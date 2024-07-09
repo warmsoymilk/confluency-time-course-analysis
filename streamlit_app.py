@@ -6,7 +6,6 @@ from googleapiclient.http import MediaFileUpload
 
 FOLDER_ID = '1PphA7iXH-_YMbLrZxB8wdtTLXcAyEuRh'
 CREDENTIALS = 'ivynatal_tpu.json'
-SCOPES = 
 
 # Authenticate and construct the Google Drive API client
 credentials = service_account.Credentials.from_service_account_info(
