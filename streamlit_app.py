@@ -1,10 +1,12 @@
 import io
-from datetime import datetime, timezone
+from datetime import datetime
+from dateutil import parser, tz
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -14,14 +16,24 @@ FOLDER_ID = '1PphA7iXH-_YMbLrZxB8wdtTLXcAyEuRh'
 CREDENTIALS = 'ivynatal_tpu.json'
 
 # Increments session state
-def increment_step():
-    st.session_state.update(step=st.session_state.step + 1)
+def increment_step(step_to=None):
+    if step_to is None:
+        step_to = st.session_state.step + 1
+    st.session_state.update(step=step_to)
     st.rerun()
 
 # Function to convert timestamp into UTC datetime
 # Timestamps are like: 2024-07-09T20:59:56.596Z
 def timestamp_to_datetime(ts):
-    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    datetime_obj = parser.parse(ts)
+    return datetime_obj
+
+# Converts datetime object to PST human-readable string
+def datetime_to_human_readable(dt):
+    pst_timezone = tz.gettz('America/Los_Angeles')
+    datetime_obj_pst = dt.astimezone(pst_timezone)
+    human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M:%S %p %Z')
+    return human_readable
 
 # Return authenticated Google Drive connectoion
 def get_drive_service():
@@ -43,6 +55,7 @@ def download_file_list():
     # Add UTC timestamp to each entry and sort from most recent
     for file in files:
         file['time'] = timestamp_to_datetime(file['createdTime'])
+        file['time_str'] = datetime_to_human_readable(file['time'])
     files.sort(key=lambda x: x['time'], reverse=True)
 
     # Filter for files ending with _well_confluencies.csv
@@ -59,22 +72,27 @@ def download_file_list():
 
 # Select files to include in analysis
 def select_files_for_analysis():
-    st.write('Select files to include in analysis:')
+    st.write('Select either a single file to view the per-well data for that plate only, or select multiple files to perform a time-course analysis.')
     files = st.session_state.files
     files = st.data_editor(
         files,
         column_config={
             'selected': 'Selected',
             'name': 'Filename',
-            'time': 'Time Created',
+            'time_str': 'Time Created',
         },
-        disabled=['name', 'time'],
-        column_order=['selected', 'name', 'time'],
+        disabled=['name', 'time_str'],
+        column_order=['selected', 'name', 'time_str'],
         hide_index=True,
     )
-    if len(files[files['selected']]) < 2:
-        st.error('Please select at least two files to continue.')
-    elif st.button('Continue'):
+    num_selected = len(files[files['selected']])
+    if num_selected == 0:
+        st.error('Please select at least one file to continue.')
+    elif num_selected == 1 and st.button('Continue'):
+        files = files[files['selected']]
+        st.session_state.files = files
+        increment_step(10)
+    elif num_selected >= 2 and st.button('Continue'):
         files = files[files['selected']]
         st.session_state.files = files
         increment_step()
@@ -106,7 +124,7 @@ def edit_timepoint_labels():
         increment_step()
 
 # Downloads the selected files from Google Drive
-def download_selected_files():
+def download_selected_files(no_timepoint_label=False):
     # Get list of files
     files = st.session_state.files
 
@@ -127,27 +145,30 @@ def download_selected_files():
             status, done = downloader.next_chunk()
         file_io.seek(0)
         data[file['id']] = pd.read_csv(file_io)
-        data[file['id']].drop('confluency_mean', axis=1, inplace=True)
+        if 'confluency_mean' in data[file['id']].columns:
+            data[file['id']].drop('confluency_mean', axis=1, inplace=True)
         data[file['id']].rename(columns={'confluency_median': 'confluency'}, inplace=True)
-        data[file['id']]['timepoint'] = file['timepoint_label']
+        if not no_timepoint_label:
+            data[file['id']]['timepoint'] = file['timepoint_label']
     
     # Create a wells mapping dataframe
-    wells = {}
-    max_wells = max(df.shape[0] for df in data.values())
-    for df in data.values():
-        df_wells = df['well'].tolist()
-        if len(df_wells) < max_wells:
-            df_wells += [''] * (max_wells - len(df_wells))
-        wells[df['timepoint'].iloc[0]] = df_wells
-    wells = pd.DataFrame(wells)
+    if not no_timepoint_label:
+        wells = {}
+        max_wells = max(df.shape[0] for df in data.values())
+        for df in data.values():
+            df_wells = df['well'].tolist()
+            if len(df_wells) < max_wells:
+                df_wells += [''] * (max_wells - len(df_wells))
+            wells[df['timepoint'].iloc[0]] = df_wells
+        wells = pd.DataFrame(wells)
 
-    # Add label column to wells
-    lowest_timestamp = str(min(int(cn) for cn in wells.columns))
-    wells['__label'] = wells[lowest_timestamp].apply(lambda x: 'Well ' + x)
+        # Add label column to wells
+        lowest_timestamp = str(min(int(cn) for cn in wells.columns))
+        wells['__label'] = wells[lowest_timestamp].apply(lambda x: 'Well ' + x)
+        st.session_state.wells = wells
 
     # Save data to session state
     st.session_state.data = data
-    st.session_state.wells = wells
 
 # Allow user to edit well mapping
 def edit_well_mapping():
@@ -189,8 +210,8 @@ def edit_well_mapping():
             st.session_state.wells = wells
             increment_step()
 
-# Join data together
-def join_data():
+# Prepare for plotting data
+def prepare_for_plotting_time_course():
     data = st.session_state.data
     wells = st.session_state.wells
     for i, df in data.items():
@@ -198,13 +219,19 @@ def join_data():
         df = pd.merge(df, wells[[timepoint, '__index']], left_on='well', right_on=timepoint, how='left')
         df = df.drop(columns=[timepoint])
         data[i] = df
-    merged = pd.concat(data.values(), axis=0, ignore_index=True)
-    merged = pd.merge(merged, wells[['__index', '__label']], on='__index', how='left')
+    df = pd.concat(data.values(), axis=0, ignore_index=True)
+    df = pd.merge(df, wells[['__index', '__label']], on='__index', how='left')
 
     # Create a pivot table for plotting
-    df = merged
     pivot_df = df.pivot(index='__label', columns='timepoint', values='confluency')
     pivot_df = pivot_df.fillna(0)  # Handle missing values
+
+    # Save plot to session state
+    st.session_state.pivot_df = pivot_df
+
+# Actually show the plot
+def show_time_course_plot():
+    pivot_df = st.session_state.pivot_df
 
     # Define the bar width and positions
     num_timepoints = len(pivot_df.columns)
@@ -225,20 +252,90 @@ def join_data():
 
     # Display the plot
     plt.tight_layout()
-
-    # Display the plot
+    st.write('Here is a bar chart showing the time course of confluency for each well:')
     st.pyplot(plt)
 
-# Plot data
-def plot_data():
-    st.write('')
+    if st.button('Restart analysis'):
+        increment_step(0)
+
+# Plot data for a single file
+def plot_single_file():
+    df = list(st.session_state.data.values())[0]
+
+    wells = df['well'].tolist()
+    well_rows = [ord(well[0]) for well in wells]
+    well_cols = [int(well[1:]) for well in wells]
+    rows = list(chr(i) for i in range(min(well_rows), max(well_rows) + 1))
+    cols = list(str(i) for i in range(min(well_cols), max(well_cols) + 1))
+
+    # Create a dictionary to map well names to their confluency_median values
+    well_confluency = {row['well']: row['confluency'] for _, row in df.iterrows()}
+
+    # Create a matrix to hold the confluency values
+    confluency_matrix = np.full((len(rows), len(cols)), -1.0)
+
+    # Populate the confluency matrix
+    for i, row in enumerate(rows):
+        for j, col in enumerate(cols):
+            well_name = f"{row}{col}"
+            if well_name in well_confluency:
+                confluency_matrix[i, j] = well_confluency[well_name]
+
+    # Create a custom colormap from white to red
+    cmap = LinearSegmentedColormap.from_list('white_red', ['white', 'red'], N=256)
+
+    # Plot the grid
+    fig, ax = plt.subplots(figsize=(len(cols), len(rows)))
+
+    # Display the confluency matrix using the colormap
+    cax = ax.imshow(confluency_matrix, cmap=cmap, vmin=0, vmax=1, aspect='auto')
+
+    # Plot the grid
+    fig, ax = plt.subplots(figsize=(len(cols), len(rows)))
+
+    # Display the confluency matrix using the colormap
+    cax = ax.imshow(confluency_matrix, cmap=cmap, vmin=0, vmax=1, aspect='auto')
+
+    # Set the ticks and labels
+    ax.set_xticks(np.arange(len(cols)) + 0.5, minor=True)
+    ax.set_yticks(np.arange(len(rows)) + 0.5, minor=True)
+    ax.set_xticks(np.arange(len(cols)))
+    ax.set_yticks(np.arange(len(rows)))
+    ax.set_xticklabels(cols)
+    ax.set_yticklabels(rows)
+
+    # Set the grid lines
+    ax.grid(which='minor', color='black', linestyle='-', linewidth=2)
+
+    # Hide the tick marks
+    ax.tick_params(which='major', size=0)
+    ax.tick_params(which='minor', size=0)
+
+    # Optionally, add labels to each cell
+    for i in range(len(rows)):
+        for j in range(len(cols)):
+            if confluency_matrix[i, j] != -1.0:
+                ax.text(j, i, f"{confluency_matrix[i, j]:.2f}", ha='center', va='center', color='black' if confluency_matrix[i, j] < 0.5 else 'white')
+
+    # Add a colorbar to show the gradient
+    cbar = fig.colorbar(cax, ax=ax, orientation='vertical')
+    cbar.set_label('Confluency (median across tiles)')
+
+    # Show the plot
+    plt.tight_layout()
+    st.write(f'Per-well confluencies for the selected plate ({st.session_state.files['name'].iloc[0]}):')
+    st.pyplot(plt)
+
+    if st.button('Restart analysis'):
+        increment_step(0)
 
 # Initialize session state
 if 'step' not in st.session_state:
     st.session_state.step = 0
 
 # Write out title (this never changes)
-st.title('Confluency Time Course Analysis')
+st.set_page_config(page_title='Confluency Data Analysis')
+st.title('Confluency Data Analysis')
 
 if st.session_state.step == 0:
     download_file_list()
@@ -253,4 +350,12 @@ elif st.session_state.step == 3:
 elif st.session_state.step == 4:
     edit_well_mapping()
 elif st.session_state.step == 5:
-    join_data()
+    prepare_for_plotting_time_course()
+    increment_step()
+elif st.session_state.step == 6:
+    show_time_course_plot()
+elif st.session_state.step == 10:
+    download_selected_files(no_timepoint_label=True)
+    increment_step()
+elif st.session_state.step == 11:
+    plot_single_file()
