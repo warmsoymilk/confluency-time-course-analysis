@@ -323,7 +323,7 @@ def plot_single_file():
 
     # Show the plot
     plt.tight_layout()
-    st.write(f'Per-well confluencies for the selected plate ({st.session_state.files['name'].iloc[0]}):')
+    st.write(f'Per-well confluencies for the selected plate ({st.session_state.files["name"].iloc[0]}):')
     st.pyplot(plt)
 
     if st.button('Restart analysis'):
