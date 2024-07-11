@@ -13,7 +13,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 FOLDER_ID = '1PphA7iXH-_YMbLrZxB8wdtTLXcAyEuRh'
-CREDENTIALS = 'ivynatal_tpu.json'
 
 # Increments session state
 def increment_step(step_to=None):
@@ -193,10 +192,11 @@ def edit_well_mapping():
             failed_cols.append(cn)
     if len(failed_cols) > 0:
         error_msg = 'Please ensure that all wells in the original data are present in the new mapping.\n\n'
-        for cn in failed_cols:
+        for cn in failed_cols[::-1]:
             new_values = set(wells[cn].unique())
             old_values = set(wells_orig[cn].unique())
             extra_values = new_values - old_values
+            extra_values = set(x for x in extra_values if x != '')
             missing_values = old_values - new_values
             if len(extra_values) > 0:
                 error_msg += 'Timepoint ' + cn + ' has erroneous values: ' + ', '.join(extra_values) + '  \n'
