@@ -31,7 +31,8 @@ def timestamp_to_datetime(ts):
 def datetime_to_human_readable(dt):
     pst_timezone = tz.gettz('America/Los_Angeles')
     datetime_obj_pst = dt.astimezone(pst_timezone)
-    human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M:%S %p %Z')
+    #human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M:%S %p %Z')
+    human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M:%S %p')
     return human_readable
 
 # Return authenticated Google Drive connectoion
