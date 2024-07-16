@@ -63,6 +63,9 @@ def download_file_list():
     # Convert to pandas DataFrame
     files = pd.DataFrame(files)
 
+    # Deduplicate files with the same filename, keeping the one with the most recent timestamp
+    files = files.sort_values('time', ascending=False).drop_duplicates('name').sort_index()
+
     # Add a column to denote whether the file is selected
     files['selected'] = False
 
