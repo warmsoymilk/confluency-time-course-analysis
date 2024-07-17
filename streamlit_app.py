@@ -1,4 +1,5 @@
 import io
+import os
 from datetime import datetime
 from dateutil import parser, tz
 
@@ -12,7 +13,9 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
+GOOGLE_DOMAIN = 'ivynatal.com'
 FOLDER_ID = '1PphA7iXH-_YMbLrZxB8wdtTLXcAyEuRh'
+TMP_FILENAME = 'tmp.png'
 
 # Increments session state
 def increment_step(step_to=None):
@@ -35,6 +38,11 @@ def datetime_to_human_readable(dt):
     human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M:%S %p')
     return human_readable
 
+# Deletes temporary file if it's there
+def delete_temp_file():
+    if os.path.exists(TMP_FILENAME):
+        os.remove(TMP_FILENAME)
+
 # Return authenticated Google Drive connectoion
 def get_drive_service():
     credentials = service_account.Credentials.from_service_account_info(
@@ -44,9 +52,13 @@ def get_drive_service():
     drive_service = build('drive', 'v3', credentials=credentials)
     return drive_service
 
-# Download list of files from Google Drive
-def download_file_list():
-    # Get list of files
+# Get list of all files from Google Drive's Automatic Uploads folder
+def get_all_automatic_uploads():
+    # Check if all_files is already in Streamlit session state
+    if 'all_files' in st.session_state:
+        return st.session_state.all_files.copy()
+    
+    # Query Google Drive
     drive_service = get_drive_service()
     query = f"'{FOLDER_ID}' in parents and trashed=false"
     results = drive_service.files().list(q=query, fields="files(id, name, createdTime)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
@@ -58,14 +70,22 @@ def download_file_list():
         file['time_str'] = datetime_to_human_readable(file['time'])
     files.sort(key=lambda x: x['time'], reverse=True)
 
-    # Filter for files ending with _well_confluencies.csv
-    files = [file for file in files if file['name'].endswith('_well_confluencies.csv')]
-
     # Convert to pandas DataFrame
     files = pd.DataFrame(files)
 
     # Deduplicate files with the same filename, keeping the one with the most recent timestamp
     files = files.sort_values('time', ascending=False).drop_duplicates('name').sort_index()
+
+    # Save to Streamlit session state and return
+    st.session_state.all_files = files
+    return files.copy()
+
+# Download list of files from Google Drive
+def download_file_list():
+    files = get_all_automatic_uploads()
+
+    # Filter for rows ending with _well_confluencies.csv
+    files = files[files['name'].str.endswith('_well_confluencies.csv')]
 
     # Remove anything in name after _BF_LED_
     files['name'] = files['name'].str.split('_BF_LED_').str[0]
@@ -75,6 +95,54 @@ def download_file_list():
 
     # Save to Streamlit session state
     st.session_state.files = files
+
+# Download list of results from Google Drive
+def download_results_list():
+    files = get_all_automatic_uploads()
+
+    # Filter for rows starting with streamlit_result_ and ending with .png
+    files = files[files['name'].str.startswith('streamlit_result_')]
+    files = files[files['name'].str.endswith('.png')]
+
+    # Remove streamlit_result_ from name
+    files['name'] = files['name'].str.replace('streamlit_result_', '')
+
+    # Prepend each name with the creation date in YYYY-MM-DD format
+    files['name'] = '[' + files['time'].dt.strftime('%Y-%m-%d') + '] ' + files['name']
+
+    # Save to Streamlit session state
+    st.session_state.results = files
+
+# Saves an image to the results folder in Google Drive
+def save_image(name):
+    # Format image name
+    name = 'streamlit_result_' + name + '.png'
+
+    # Get Google Drive service
+    drive_service = get_drive_service()
+
+    # Upload the image to Google Drive
+    file_metadata = {
+        'name': name,
+        'parents': [FOLDER_ID]
+    }
+    media = MediaFileUpload(TMP_FILENAME, mimetype='image/png')
+    file = drive_service.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
+
+    # Return file ID
+    return file['id']
+
+# Generates popover prompting you to save image
+def generate_save_image_dialog(plt):
+    if not os.path.exists(TMP_FILENAME):
+        plt.savefig(TMP_FILENAME, format='png', bbox_inches='tight')
+    name = st.text_input('Save image', placeholder='Enter a descriptive name for your image')
+    if st.button('Upload to Google Drive'):
+        if name.strip() == '':
+            st.error('Please enter a name for your image. (Remember to press Enter inside the textbox to finalize.)')
+        else:
+            save_image(name)
+            st.write('Image successfully saved to Google Drive.')
 
 # Select files to include in analysis
 def select_files_for_analysis():
@@ -102,6 +170,27 @@ def select_files_for_analysis():
         files = files[files['selected']]
         st.session_state.files = files
         increment_step()
+    
+    st.divider()
+
+    st.write('Alternatively, select and view a saved result:')
+    option = st.selectbox('Select a result to view:', st.session_state.results['name'], index=None)
+    if option is not None:
+        # Get the file ID corresponding to that name
+        file_id = st.session_state.results[st.session_state.results['name'] == option]['id'].iloc[0]
+
+        # Download the file from Google Drive
+        drive_service = get_drive_service()
+        request = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        file_io = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_io, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        file_io.seek(0)
+
+        # Display the image
+        st.image(file_io, use_column_width=True)
 
 # Allow user to edit default timepoint labels
 def edit_timepoint_labels():
@@ -262,8 +351,9 @@ def show_time_course_plot():
     st.write('Here is a bar chart showing the time course of confluency for each well:')
     st.pyplot(plt)
 
-    if st.button('Restart analysis'):
-        increment_step(0)
+    generate_save_image_dialog(plt)
+    st.divider()
+    st.button('Restart analysis', on_click=lambda: increment_step(0))
 
 # Plot data for a single file
 def plot_single_file():
@@ -333,8 +423,9 @@ def plot_single_file():
     st.write(f'Per-well confluencies for the selected plate ({st.session_state.files["name"].iloc[0]}):')
     st.pyplot(plt)
 
-    if st.button('Restart analysis'):
-        increment_step(0)
+    generate_save_image_dialog(plt)
+    st.divider()
+    st.button('Restart analysis', on_click=lambda: increment_step(0))
 
 # Initialize session state
 if 'step' not in st.session_state:
@@ -345,7 +436,9 @@ st.set_page_config(page_title='Confluency Data Analysis')
 st.title('Confluency Data Analysis')
 
 if st.session_state.step == 0:
+    delete_temp_file()
     download_file_list()
+    download_results_list()
     increment_step()
 if st.session_state.step == 1:
     select_files_for_analysis()
