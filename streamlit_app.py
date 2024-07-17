@@ -107,6 +107,9 @@ def download_results_list():
     # Remove streamlit_result_ from name
     files['name'] = files['name'].str.replace('streamlit_result_', '')
 
+    # Replace errroneous .png.png with .png
+    files['name'] = files['name'].str.replace('.png.png', '.png')
+
     # Prepend each name with the creation date in YYYY-MM-DD format
     files['name'] = '[' + files['time'].dt.strftime('%Y-%m-%d') + '] ' + files['name']
 
