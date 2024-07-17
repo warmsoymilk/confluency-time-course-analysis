@@ -35,13 +35,18 @@ def datetime_to_human_readable(dt):
     pst_timezone = tz.gettz('America/Los_Angeles')
     datetime_obj_pst = dt.astimezone(pst_timezone)
     #human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M:%S %p %Z')
-    human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M:%S %p')
+    human_readable = datetime_obj_pst.strftime('%Y-%m-%d %I:%M %p')
     return human_readable
 
 # Deletes temporary file if it's there
 def delete_temp_file():
     if os.path.exists(TMP_FILENAME):
         os.remove(TMP_FILENAME)
+
+# Clears plot title from state variable
+def clear_plot_title():
+    if 'title' in st.session_state:
+        del st.session_state['title']
 
 # Return authenticated Google Drive connectoion
 def get_drive_service():
@@ -103,6 +108,8 @@ def download_results_list():
     # Filter for rows starting with streamlit_result_ and ending with .png
     files = files[files['name'].str.startswith('streamlit_result_')]
     files = files[files['name'].str.endswith('.png')]
+    # Also remove files that are exactly streamlit_result_.png
+    files = files[files['name'] != 'streamlit_result_.png']
 
     # Remove streamlit_result_ from name
     files['name'] = files['name'].str.replace('streamlit_result_', '')
@@ -137,8 +144,7 @@ def save_image(name):
 
 # Generates popover prompting you to save image
 def generate_save_image_dialog(plt):
-    if not os.path.exists(TMP_FILENAME):
-        plt.savefig(TMP_FILENAME, format='png', bbox_inches='tight')
+    plt.savefig(TMP_FILENAME, format='png', bbox_inches='tight')
     name = st.text_input('Save image', placeholder='Enter a descriptive name for your image')
     if st.button('Upload to Google Drive'):
         if name.strip() == '':
@@ -212,11 +218,11 @@ def edit_timepoint_labels():
         files,
         column_config={
             'name': 'Filename',
-            'time': 'Time Created',
+            'time_str': 'Time Created',
             'timepoint_label': 'Timepoint',
         },
-        disabled=['name', 'time'],
-        column_order=['name', 'time', 'timepoint_label'],
+        disabled=['name', 'time_str'],
+        column_order=['name', 'time_str', 'timepoint_label'],
         hide_index=True,
     )
     if st.button('Continue'):
@@ -351,11 +357,21 @@ def show_time_course_plot():
     ax.set_xticklabels(labels)
     ax.legend(title='Timepoint', bbox_to_anchor=(1.05, 1), loc='upper left')  # Move legend outside the plot
 
+    # Add title
+    if 'title' in st.session_state:
+        ax.set_title(st.session_state.title)
+    
+    # Rotate labels
+    if 'rotate_labels' in st.session_state and st.session_state.rotate_labels:
+        ax.tick_params(axis='x', labelrotation=45)
+
     # Display the plot
     plt.tight_layout()
     st.write('Here is a bar chart showing the time course of confluency for each well:')
     st.pyplot(plt)
 
+    st.checkbox('Rotate x-axis labels', value=False, key='rotate_labels')
+    st.text_input('Update plot title', placeholder='Enter a title for your plot', key='title')
     generate_save_image_dialog(plt)
     st.divider()
     st.button('Restart analysis', on_click=lambda: increment_step(0))
@@ -421,7 +437,7 @@ def plot_single_file():
 
     # Add a colorbar to show the gradient
     cbar = fig.colorbar(cax, ax=ax, orientation='vertical')
-    cbar.set_label('Confluency (median across tiles)')
+    cbar.set_label('Confluency')
 
     # Show the plot
     plt.tight_layout()
@@ -442,6 +458,7 @@ st.title('Confluency Data Analysis')
 
 if st.session_state.step == 0:
     delete_temp_file()
+    clear_plot_title()
     download_file_list()
     download_results_list()
     increment_step()
