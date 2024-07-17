@@ -141,6 +141,8 @@ def generate_save_image_dialog(plt):
         if name.strip() == '':
             st.error('Please enter a name for your image. (Remember to press Enter inside the textbox to finalize.)')
         else:
+            if name.endswith('.png'):
+                name = name[:-4]
             save_image(name)
             st.write('Image successfully saved to Google Drive.')
 
